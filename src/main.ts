@@ -2,7 +2,6 @@ import './style.css'
 import type { Move } from './core/moves'
 import { createScramble, invertMove, normalizeStepCount } from './core/scramble'
 import {
-  advanceState,
   beginScramble,
   createSession,
   enterRestoreMode,
@@ -10,6 +9,8 @@ import {
   manualMove,
   nextStepText,
   progressText,
+  resetSession,
+  scrambleStep,
   stepBackward,
   stepForward,
   type Session,
@@ -32,6 +33,7 @@ const progressLine = requireElement<HTMLDivElement>('#progress')
 const hintLine = requireElement<HTMLDivElement>('#hint')
 const stepsInput = requireElement<HTMLInputElement>('#scramble-steps')
 const scrambleButton = requireElement<HTMLButtonElement>('#scramble')
+const resetButton = requireElement<HTMLButtonElement>('#reset')
 const restoreButton = requireElement<HTMLButtonElement>('#restore')
 const stepForwardButton = requireElement<HTMLButtonElement>('#step-forward')
 const stepBackwardButton = requireElement<HTMLButtonElement>('#step-backward')
@@ -72,6 +74,7 @@ function refreshUi(): void {
 
   stepsInput.disabled = blocked
   scrambleButton.disabled = blocked
+  resetButton.disabled = blocked
   restoreButton.disabled = blocked || restoring
   stepForwardButton.disabled = blocked || !restoring || session.cursor >= total
   stepBackwardButton.disabled = blocked || !restoring || session.cursor === 0
@@ -85,14 +88,14 @@ function buildHint(): string {
   if (scrambling) {
     return '正在按随机步骤打乱，转完就停'
   }
-  if (session.scramble.length === 0) {
-    return '先设好步数，点"打乱"'
-  }
   if (session.phase === 'restoring') {
     const next = nextStepText(session)
     return next === null ? '复原模式 · 已经走完全部步骤' : `复原模式 · ${next}（用上一步/下一步慢慢看）`
   }
-  return `倒推计划已就绪（共 ${session.plan.length} 步），点"一键复原"开始单步复原`
+  if (session.history.length === 0) {
+    return '魔方是复原状态：可以直接手动转，或者设好步数点"打乱"'
+  }
+  return `你一共动过 ${session.history.length} 步，点"一键复原"可以一步步倒回去`
 }
 
 // ---------- 转动的总入口 ----------
@@ -182,13 +185,21 @@ async function runScramble(): Promise<void> {
   // 一步步演出来，每一步转完才走下一步
   try {
     for (const move of moves) {
-      const completed = await playMove(move, (current) => advanceState(current, move))
+      const completed = await playMove(move, (current) => scrambleStep(current, move))
       if (!completed) return
     }
   } finally {
     scrambling = false
     refreshUi()
   }
+}
+
+/** 重置：一键变回初始的复原状态（不用动画，直接到位） */
+function runReset(): void {
+  if (busy || scrambling) return
+  session = resetSession()
+  cubeRenderer.render(session.state)
+  refreshUi()
 }
 
 function runEnterRestore(): void {
@@ -220,6 +231,7 @@ function runStepBackward(): void {
 scrambleButton.addEventListener('click', () => {
   void runScramble()
 })
+resetButton.addEventListener('click', runReset)
 restoreButton.addEventListener('click', runEnterRestore)
 stepForwardButton.addEventListener('click', runStepForward)
 stepBackwardButton.addEventListener('click', runStepBackward)

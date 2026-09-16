@@ -1,32 +1,51 @@
 /**
- * 会话：把"魔方现在什么状态 + 这次打乱是什么 + 复原计划走到第几步 + 现在什么模式"
+ * 会话：把"魔方现在什么状态 + 从上次复原以来你做过的每一步 + 复原计划走到第几步 + 什么模式"
  * 放在一起管理。纯逻辑，不许引入 three —— 界面只是把这里的数据画出来。
  *
- * 为什么规则都写在这里？因为像"复原模式下如果用户强行转动，计划要作废"
- * 这种规则，如果写在界面代码里就没法测了。放在这里，测试可以直接验。
+ * 为什么规则都写在这里？因为像"复原模式下用户强行转动，计划要作废"这种规则，
+ * 写在界面代码里就没法测了；放在这里，测试可以直接验。
+ *
+ * ===== 按实测反馈改过的地方（重要）=====
+ * 以前只存"这次的打乱步骤"，复原计划 = 打乱的倒推。这个做法有个致命前提：
+ * 打乱之前魔方必须是复原的。只要手动转过一下，打乱前就不是复原状态了，
+ * 那时候无论重新打乱多少次，倒推计划都回不到复原 —— 死循环。
+ *
+ * 现在改成记录"从上次复原以来真正做过的每一步"（打乱的、手动转的，全都记）。
+ * 复原计划 = 把这份记录从后往前、每一步反过来。于是：
+ *   - 不管中间怎么折腾，一键复原永远能走回复原；
+ *   - 复原成功时操作记录自然就空了（每复原一步就是"还掉记录里的最后一步"），
+ *     不需要额外写清理逻辑。
+ *
+ * 不变式（测试里会一直验它）：
+ *   把 history 里的步骤从复原状态依次走一遍，必然等于当前的 state。
  */
 
 import { createSolvedState, isSolved, type CubeState } from './cubeState'
 import type { Move } from './moves'
 import { createRestorePlan, invertMove } from './scramble'
-import { applyMove, applyMoves } from './turns'
+import { applyMove } from './turns'
 
 /** idle = 自由模式（可以手动转）；restoring = 复原模式（手动转动按钮置灰） */
 export type SessionPhase = 'idle' | 'restoring'
 
 /** 复原模式下用户强行转动时的提示（需求指定的原文） */
 export const PLAN_INVALID_NOTICE = '计划已失效，请重新点一键复原'
-/** 计划已经作废、没法再用倒推复原时的提示 */
-export const PLAN_UNUSABLE_NOTICE = '魔方已经被手动转动过，这份倒推计划不适用了，请重新打乱再复原'
-/** 还没打乱就点一键复原时的提示 */
-export const NO_SCRAMBLE_NOTICE = '还没有打乱，先点"打乱"再点一键复原'
+/** 魔方本来就是复原状态、没什么可倒推时的提示 */
+export const ALREADY_SOLVED_NOTICE = '魔方已经是复原状态，不需要复原'
+/** 重置之后的提示 */
+export const RESET_NOTICE = '已重置到初始的复原状态'
 
 export type Session = {
   /** 魔方现在的状态 */
   readonly state: CubeState
-  /** 这次打乱的步骤（按顺序存下来） */
+  /**
+   * 从上次复原/重置以来，真正做过的每一步（按顺序）。
+   * 复原就是把这份记录从后往前一步步还回去。
+   */
+  readonly history: readonly Move[]
+  /** 最近一次打乱的步骤（单独存一份，以后要显示"打乱序列"时用得上） */
   readonly scramble: readonly Move[]
-  /** 复原计划 = 打乱步骤倒过来反向 */
+  /** 本次复原的计划：进复原模式时按 history 算出来的快照（用来显示总步数） */
   readonly plan: readonly Move[]
   /** 复原计划已经走了几步（0 ~ plan.length） */
   readonly cursor: number
@@ -36,10 +55,11 @@ export type Session = {
   readonly notice: string | null
 }
 
-/** 开局：复原状态的魔方，没有打乱、没有计划 */
+/** 开局：复原状态的魔方，没有操作记录、没有计划 */
 export function createSession(): Session {
   return {
     state: createSolvedState(),
+    history: [],
     scramble: [],
     plan: [],
     cursor: 0,
@@ -48,38 +68,58 @@ export function createSession(): Session {
   }
 }
 
+/** 重置：一键变回初始的复原状态（操作记录一起清空，等于重新开局） */
+export function resetSession(): Session {
+  return { ...createSession(), notice: RESET_NOTICE }
+}
+
 /**
- * 开始一次打乱：把这次的步骤存下来，按它生成倒推计划，光标归零。
- * 如果在复原模式里又点了打乱，等于重新开始，所以模式也回到自由模式。
+ * 状态往前走一步，并把这一步记进操作记录。
+ * 如果这一步正好把魔方弄回了复原状态，记录直接清空 ——
+ * 记录的意义只是"离复原还差哪些步"，已经是复原状态就没必要留着了。
+ */
+function withMove(session: Session, move: Move): Session {
+  const state = applyMove(session.state, move)
+  if (isSolved(state)) {
+    return { ...session, state, history: [] }
+  }
+  return { ...session, state, history: [...session.history, move] }
+}
+
+/**
+ * 开始一次打乱：把这次的步骤单独存一份，并把上一次的复原计划清掉。
+ * 注意：操作记录不清空！如果魔方现在不是复原状态，那些历史操作也必须留着，
+ * 否则以后就再也倒推不回复原了（这正是以前那个死循环的根源）。
  */
 export function beginScramble(session: Session, moves: readonly Move[]): Session {
   return {
     ...session,
     scramble: [...moves],
-    plan: createRestorePlan(moves),
+    plan: [],
     cursor: 0,
     phase: 'idle',
     notice: null,
   }
 }
 
-/** 打乱动画每走一步调用：只把状态往前推，计划、光标、模式都不动 */
-export function advanceState(session: Session, move: Move): Session {
-  return { ...session, state: applyMove(session.state, move) }
+/** 打乱动画每走完一步调用：把状态往前推，并记进操作记录 */
+export function scrambleStep(session: Session, move: Move): Session {
+  return withMove(session, move)
 }
 
 /**
  * 用户手动转一步（界面正常路径）。
  * 关键规则：如果这时候正在复原模式下，说明有人绕过了界面强行转动，
- * 那就立刻把这次转动执行掉，同时把剩下的复原步骤全部作废、退出复原模式、给出提示。
+ * 那就立刻把这次转动执行掉，同时把剩下的复原步骤作废、退出复原模式、给出提示。
+ * （注意：作废的只是"这一次的计划"，操作记录里留着这一步，
+ *   所以重新点一键复原时能算出一份新的、正确的计划。）
  */
 export function manualMove(session: Session, move: Move): Session {
-  const state = applyMove(session.state, move)
+  const applied = withMove(session, move)
 
   if (session.phase === 'restoring') {
     return {
-      ...session,
-      state,
+      ...applied,
       plan: [],
       cursor: 0,
       phase: 'idle',
@@ -87,35 +127,25 @@ export function manualMove(session: Session, move: Move): Session {
     }
   }
 
-  return { ...session, state, notice: null }
+  return { ...applied, notice: null }
 }
 
 /**
- * 从现在这里把剩下的计划走完，能不能正好复原？
- * 能，说明这份倒推计划还有效；不能（比如中途被手动转过），就不能拿它当复原方案。
- */
-export function isPlanStillValid(session: Session): boolean {
-  if (session.plan.length === 0) {
-    return false
-  }
-  return isSolved(applyMoves(session.state, session.plan.slice(session.cursor)))
-}
-
-/**
- * 一键复原：进入复原模式。
- * 注意它只"把计划装填好"，不替用户走路 —— 一步一步走是【下一步】的事。
+ * 一键复原：按"从上次复原以来的全部操作"算一份倒推计划，进入复原模式。
+ * 它只把计划装填好，不替用户走路 —— 一步一步走是【下一步】的事。
+ * 因为计划是按真实操作记录算的，所以永远有效，不会再出现"计划不适用"的死路。
  */
 export function enterRestoreMode(session: Session): Session {
-  if (session.phase === 'restoring') {
-    return session
+  if (session.history.length === 0) {
+    return { ...session, plan: [], cursor: 0, phase: 'idle', notice: ALREADY_SOLVED_NOTICE }
   }
-  if (session.scramble.length === 0) {
-    return { ...session, notice: NO_SCRAMBLE_NOTICE }
+  return {
+    ...session,
+    plan: createRestorePlan(session.history),
+    cursor: 0,
+    phase: 'restoring',
+    notice: null,
   }
-  if (!isPlanStillValid(session)) {
-    return { ...session, notice: PLAN_UNUSABLE_NOTICE }
-  }
-  return { ...session, phase: 'restoring', notice: null }
 }
 
 /** 退出复原模式。已经走过的进度保留着，再点一次一键复原可以接着走 */
@@ -126,35 +156,41 @@ export function exitRestoreMode(session: Session): Session {
   return { ...session, phase: 'idle', notice: null }
 }
 
-/** 下一步：执行计划里的下一步 */
+/**
+ * 下一步：把操作记录里的最后一步"还掉"（反着做一次），并从记录里去掉它。
+ * 走完最后一步时记录自然变空 —— 这就是"复原成功即清空操作记录"。
+ */
 export function stepForward(session: Session): Session {
   if (session.phase !== 'restoring') {
     return session
   }
-  const move = session.plan[session.cursor]
-  if (move === undefined) {
+  const pending = session.history[session.history.length - 1]
+  if (pending === undefined) {
     return session
   }
   return {
     ...session,
-    state: applyMove(session.state, move),
+    state: applyMove(session.state, invertMove(pending)),
+    history: session.history.slice(0, -1),
     cursor: session.cursor + 1,
     notice: null,
   }
 }
 
-/** 上一步：把刚走的那一步反着走回去（不是"回放旧状态"，是真的反着转一步） */
+/**
+ * 上一步：把刚还掉的那一步重新做回去（并重新记回操作记录）。
+ * 不是"回放旧状态"，是真的反着转回去，所以来回点也不会出错。
+ */
 export function stepBackward(session: Session): Session {
   if (session.phase !== 'restoring') {
     return session
   }
-  const previous = session.plan[session.cursor - 1]
-  if (previous === undefined) {
+  const planned = session.plan[session.cursor - 1]
+  if (planned === undefined) {
     return session
   }
   return {
-    ...session,
-    state: applyMove(session.state, invertMove(previous)),
+    ...withMove(session, invertMove(planned)),
     cursor: session.cursor - 1,
     notice: null,
   }
@@ -162,8 +198,7 @@ export function stepBackward(session: Session): Session {
 
 /**
  * 进度文字，例如：第 3 / 20 步：R'
- * 含义：已经走完的步数 + 刚刚走的那一步是什么。
- * 一步都还没走时显示"还没开始"。
+ * 含义：已经走完的步数 + 刚刚走的那一步是什么。一步都没走时显示"还没开始"。
  */
 export function progressText(session: Session): string {
   const total = session.plan.length
