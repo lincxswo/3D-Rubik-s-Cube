@@ -80,6 +80,43 @@ export function stickerIndexFor(position: CubiePosition, face: Face): number {
   throw new Error(`不认识的面：${face}`)
 }
 
+/** 把"方向"翻译回"面"（例如 [1,0,0] 就是 R 面） */
+export function faceFromNormal(normal: CubiePosition): Face {
+  const face = FACES.find((candidate) => {
+    const [nx, ny, nz] = FACE_NORMAL[candidate]
+    return nx === normal[0] && ny === normal[1] && nz === normal[2]
+  })
+  if (face === undefined) {
+    throw new Error(`这个方向不对应任何一面：${normal.join(',')}`)
+  }
+  return face
+}
+
+/**
+ * 把某个方向绕着一个面转 90°：站在那个面外面看是顺时针。
+ *
+ * 为什么这么算：从外面看是顺时针，按右手定则就是绕着外法线转 -90°，
+ * 写成公式就是 v' = n(n·v) - n×v（n 是那个面的外法线）。
+ * 这一条数学既用来转"魔方数据"，也用来转"画面里的方块"，所以两边永远一致。
+ */
+export function rotateClockwise(vector: CubiePosition, axis: Face): CubiePosition {
+  const [x, y, z] = vector
+  const [nx, ny, nz] = FACE_NORMAL[axis]
+  const crossX = ny * z - nz * y
+  const crossY = nz * x - nx * z
+  const crossZ = nx * y - ny * x
+  const dot = nx * x + ny * y + nz * z
+  return [dot * nx - crossX, dot * ny - crossY, dot * nz - crossZ]
+}
+
+/** 转某一面时，会跟着动的那 9 个小方块的位置 */
+export function layerPositions(face: Face): CubiePosition[] {
+  const [nx, ny, nz] = FACE_NORMAL[face]
+  return CUBIE_POSITIONS.filter(
+    (position) => position[0] * nx + position[1] * ny + position[2] * nz === 1,
+  )
+}
+
 /** 一个小方块露在外面的某一面，该是什么颜色 */
 export type CubieSticker = {
   readonly face: Face
