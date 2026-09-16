@@ -109,12 +109,15 @@ export function rotateClockwise(vector: CubiePosition, axis: Face): CubiePositio
   return [dot * nx - crossX, dot * ny - crossY, dot * nz - crossZ]
 }
 
+/** 这个小方块是不是在"转某一面时会跟着动"的那一层里 */
+export function isInLayer(position: CubiePosition, face: Face): boolean {
+  const [nx, ny, nz] = FACE_NORMAL[face]
+  return position[0] * nx + position[1] * ny + position[2] * nz === 1
+}
+
 /** 转某一面时，会跟着动的那 9 个小方块的位置 */
 export function layerPositions(face: Face): CubiePosition[] {
-  const [nx, ny, nz] = FACE_NORMAL[face]
-  return CUBIE_POSITIONS.filter(
-    (position) => position[0] * nx + position[1] * ny + position[2] * nz === 1,
-  )
+  return CUBIE_POSITIONS.filter((position) => isInLayer(position, face))
 }
 
 /** 一个小方块露在外面的某一面，该是什么颜色 */

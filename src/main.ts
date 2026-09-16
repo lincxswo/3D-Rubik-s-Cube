@@ -54,8 +54,14 @@ let scrambling = false
  */
 let generation = 0
 
-const moveButtons = createMoveButtons(moveBar, (move) => {
-  requestMove(move, 'ui')
+const moveButtons = createMoveButtons(moveBar, {
+  onMove: (move) => {
+    requestMove(move, 'ui')
+  },
+  // 鼠标移到哪个转动按钮上，就把对应的面点亮（只影响画面，不改数据）
+  onHoverFace: (face) => {
+    cubeRenderer.setHighlightedFace(face)
+  },
 })
 
 cubeRenderer.render(session.state)

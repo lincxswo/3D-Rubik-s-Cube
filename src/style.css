@@ -98,3 +98,15 @@ body {
   opacity: 0.45;
   cursor: default;
 }
+
+/* 12 个转动按钮的"置灰"用类实现：不用 disabled 属性，
+   这样鼠标悬停时它们照样能触发面高亮 */
+#moves button.is-blocked {
+  opacity: 0.45;
+  cursor: default;
+}
+
+#moves button.is-blocked:hover {
+  background: #1e2630;
+  border-color: #2f3a46;
+}

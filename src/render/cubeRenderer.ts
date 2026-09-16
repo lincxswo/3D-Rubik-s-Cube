@@ -17,10 +17,19 @@
 
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
-import { CUBIE_POSITIONS, FACE_NORMAL, cubieStickers, layerPositions } from '../core/cubies'
+import { LineSegments2 } from 'three/addons/lines/LineSegments2.js'
+import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js'
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js'
+import {
+  CUBIE_POSITIONS,
+  FACE_NORMAL,
+  cubieStickers,
+  layerPositions,
+} from '../core/cubies'
 import type { CubiePosition } from '../core/cubies'
-import type { CubeState, Color, Face } from '../core/cubeState'
+import { COLORS, type CubeState, type Color, type Face } from '../core/cubeState'
 import { parseMove, type Move } from '../core/moves'
+import { CUBIE_SIZE, OUTLINE_SIZE, stickerHighlight } from './highlight'
 
 /** 标准配色到底长什么样（魔方上那六种颜色的具体色号） */
 const COLOR_HEX: Record<Color, number> = {
@@ -35,11 +44,24 @@ const COLOR_HEX: Record<Color, number> = {
 /** 小方块内部看不见的面用深灰，像真魔方的黑塑料 */
 const INNER_COLOR = 0x1b1b1b
 
-/** 小方块边长。每一层之间距离是 1，方块做 0.94，于是每两个方块之间留 0.06 的缝 */
-const CUBIE_SIZE = 0.94
-
 /** 转一次动画要多久（毫秒） */
 const TURN_DURATION_MS = 200
+
+/**
+ * 鼠标悬停高亮的两档参数：被指到的那一层轻微发光，其余的面轻微压暗。
+ * 为什么两边都要动？因为白色的面已经在亮度天花板上了，只把它调亮是看不出变化的。
+ */
+const HIGHLIGHT_GLOW_RATIO = 0.3
+const HIGHLIGHT_DIM_RATIO = 0.75
+
+/**
+ * 悬停高亮的描边：给被指到那一层的 9 个小方块套上亮黄色的棱线。
+ * 描边立方体的边长（OUTLINE_SIZE）在 highlight.ts 里，比小方块大一圈，
+ * 所以线条浮在方块表面外面，既不会和表面打架（z-fighting），也更容易看清。
+ */
+const OUTLINE_COLOR = 0xffe14d
+/** 线宽，单位是 CSS 像素（LineMaterial 的默认单位），所以不管怎么缩放都保证看得见 */
+const OUTLINE_WIDTH = 4
 
 /** BoxGeometry 的 6 个面固定按这个顺序排，按下标给它指定材质 */
 const BOX_FACE_INDEX: Record<Face, number> = {
@@ -73,6 +95,11 @@ export type CubeRenderer = {
   animateMove(move: Move, stateAfter: CubeState): Promise<boolean>
   /** 立刻停下正在播的转动，画面回到"转动之前"的样子（这次转动不算数） */
   cancelMove(): void
+  /**
+   * 高亮某一个面（鼠标悬停在转动按钮上时用）。传 null 就取消高亮。
+   * 这只改画面：不碰魔方状态，也不会触发任何转动，和正在播的动画互不干扰。
+   */
+  setHighlightedFace(face: Face | null): void
   /** 收摊：停掉动画、摘掉画布、释放显存 */
   dispose(): void
 }
@@ -90,6 +117,11 @@ export function createCubeRenderer(container: HTMLElement): CubeRenderer {
 
   // 正在播放的那一次转动（同一时刻最多一个，这就是"动画期间不接受新指令"的底气）
   let running: RunningTurn | null = null
+
+  // 画面上此刻实际显示的状态（动画期间它比 session 里的最新状态"落后一步"）
+  let shownState: CubeState | null = null
+  // 鼠标悬停指着哪个面，没指着就是 null
+  let highlightedFace: Face | null = null
 
   // 鼠标拖拽转视角、滚轮缩放，用的是 three 自带的 OrbitControls
   const controls = new OrbitControls(camera, renderer.domElement)
@@ -110,16 +142,17 @@ export function createCubeRenderer(container: HTMLElement): CubeRenderer {
   fillLight.position.set(-8, -6, -10)
   scene.add(fillLight)
 
-  // 6 种颜色 + 1 种内部色，所有方块共用这几份材质
+  // 6 种颜色 x 3 档观感 + 1 种内部色，全部方块共用这几份材质
   const innerMaterial = new THREE.MeshLambertMaterial({ color: INNER_COLOR })
-  const colorMaterials: Record<Color, THREE.MeshLambertMaterial> = {
-    white: new THREE.MeshLambertMaterial({ color: COLOR_HEX.white }),
-    yellow: new THREE.MeshLambertMaterial({ color: COLOR_HEX.yellow }),
-    red: new THREE.MeshLambertMaterial({ color: COLOR_HEX.red }),
-    orange: new THREE.MeshLambertMaterial({ color: COLOR_HEX.orange }),
-    blue: new THREE.MeshLambertMaterial({ color: COLOR_HEX.blue }),
-    green: new THREE.MeshLambertMaterial({ color: COLOR_HEX.green }),
-  }
+  const normalMaterials = createColorMaterials(1, 0)
+  const glowMaterials = createColorMaterials(1, HIGHLIGHT_GLOW_RATIO)
+  const dimMaterials = createColorMaterials(HIGHLIGHT_DIM_RATIO, 0)
+
+  // 描边用的棱线：一个"比方块大一圈"的立方体的 12 条棱
+  const outlineBox = new THREE.BoxGeometry(OUTLINE_SIZE, OUTLINE_SIZE, OUTLINE_SIZE)
+  const outlineEdges = new THREE.EdgesGeometry(outlineBox)
+  const outlineGeometry = new LineSegmentsGeometry().fromEdgesGeometry(outlineEdges)
+  const outlineMaterial = new LineMaterial({ color: OUTLINE_COLOR, linewidth: OUTLINE_WIDTH })
 
   // 摆出 26 个小方块
   const geometry = new THREE.BoxGeometry(CUBIE_SIZE, CUBIE_SIZE, CUBIE_SIZE)
@@ -128,19 +161,68 @@ export function createCubeRenderer(container: HTMLElement): CubeRenderer {
     const materials: THREE.MeshLambertMaterial[] = Array.from({ length: 6 }, () => innerMaterial)
     const mesh = new THREE.Mesh(geometry, materials)
     mesh.position.set(position[0], position[1], position[2])
+
+    // 描边挂成小方块的"子物体"：方块被临时挪进转动组时，描边会自动跟着一起转，
+    // 所以动画期间的高亮不需要任何额外的同步代码
+    const outline = new LineSegments2(outlineGeometry, outlineMaterial)
+    outline.visible = false
+    mesh.add(outline)
+
     scene.add(mesh)
     meshByPosition.set(positionKey(position), mesh)
-    return { position, materials }
+    return { position, materials, outline }
   })
 
   function render(state: CubeState): void {
+    // 记住"画面上现在显示的是哪个状态"。高亮切换时要重铺材质，
+    // 而重铺必须用这个状态 —— 动画播放期间它和数据里的最新状态是不一样的：
+    // 数据要等动画演完才提交，这时候画面上还是转动之前的样子。
+    shownState = state
+    applyMaterials()
+  }
+
+  /**
+   * 高亮某个面。只改画面，不动任何几何/动画状态。
+   * 两件事一起做：被指到那一层的贴纸轻微发光（底衬），并给这 9 个小方块套上亮色描边（主视觉）。
+   * 两边都是"按当前指着的面整体重算"，所以从 U 换到 R、或者移开鼠标，都不可能留下痕迹。
+   */
+  function setHighlightedFace(face: Face | null): void {
+    if (highlightedFace === face) {
+      return
+    }
+    highlightedFace = face
+    applyMaterials()
+    applyOutline()
+  }
+
+  /**
+   * 描边只显示"被指到的那一层"的 9 个小方块，其余一律藏起来。
+   * 判断条件和"该发光"用的是同一个规则（stickerHighlight === 'glow'），
+   * 所以描边和发光永远落在同一批方块上，不可能对不上。
+   */
+  function applyOutline(): void {
+    for (const cubie of cubies) {
+      cubie.outline.visible = stickerHighlight(cubie.position, highlightedFace) === 'glow'
+    }
+  }
+
+  /** 照着"画面上正在显示的状态 + 当前高亮的面"重新铺一遍材质 */
+  function applyMaterials(): void {
+    if (shownState === null) {
+      return
+    }
     for (const cubie of cubies) {
       // 先全部涂成内部色，再把露出来的面换成对应颜色
       for (let index = 0; index < 6; index++) {
         cubie.materials[index] = innerMaterial
       }
-      for (const sticker of cubieStickers(state, cubie.position)) {
-        cubie.materials[BOX_FACE_INDEX[sticker.face]] = colorMaterials[sticker.color]
+
+      const shade = stickerHighlight(cubie.position, highlightedFace)
+      const table =
+        shade === 'glow' ? glowMaterials : shade === 'dim' ? dimMaterials : normalMaterials
+
+      for (const sticker of cubieStickers(shownState, cubie.position)) {
+        cubie.materials[BOX_FACE_INDEX[sticker.face]] = table[sticker.color]
       }
     }
   }
@@ -239,19 +321,45 @@ export function createCubeRenderer(container: HTMLElement): CubeRenderer {
     resizeObserver.disconnect()
     controls.dispose()
     geometry.dispose()
-    for (const material of [innerMaterial, ...Object.values(colorMaterials)]) {
-      material.dispose()
+    innerMaterial.dispose()
+    for (const table of [normalMaterials, glowMaterials, dimMaterials]) {
+      for (const material of Object.values(table)) {
+        material.dispose()
+      }
     }
+    outlineGeometry.dispose()
+    outlineEdges.dispose()
+    outlineBox.dispose()
+    outlineMaterial.dispose()
     renderer.dispose()
     container.removeChild(renderer.domElement)
   }
 
-  return { render, animateMove, cancelMove, dispose }
+  return { render, animateMove, cancelMove, setHighlightedFace, dispose }
 }
 
 /** 小方块位置的查找键 */
 function positionKey(position: CubiePosition): string {
   return position.join(',')
+}
+
+/**
+ * 造一套 6 色的材质。
+ * brightness 整体调亮/调暗，emissiveRatio 给颜色加"自发光"（看起来在发光）。
+ */
+function createColorMaterials(
+  brightness: number,
+  emissiveRatio: number,
+): Record<Color, THREE.MeshLambertMaterial> {
+  const materials = {} as Record<Color, THREE.MeshLambertMaterial>
+  for (const color of COLORS) {
+    const base = new THREE.Color(COLOR_HEX[color])
+    materials[color] = new THREE.MeshLambertMaterial({
+      color: base.clone().multiplyScalar(brightness),
+      emissive: base.clone().multiplyScalar(emissiveRatio),
+    })
+  }
+  return materials
 }
 
 /** 让转动"起步慢、中间快、收尾慢"，看起来更像真的在拧 */
