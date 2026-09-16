@@ -59,14 +59,20 @@ type RunningTurn = {
   meshes: THREE.Mesh[]
   stateAfter: CubeState
   startTime: number
-  resolve: () => void
+  /** 参数表示"这次转动到底转完了没有"：true 转完，false 被强行取消 */
+  resolve: (completed: boolean) => void
 }
 
 export type CubeRenderer = {
   /** 把某个状态画出来。状态变了就再调一次 */
   render(state: CubeState): void
-  /** 播放一次转层动画；转完自动把 stateAfter 画出来。动画结束 Promise 才结束 */
-  animateMove(move: Move, stateAfter: CubeState): Promise<void>
+  /**
+   * 播放一次转层动画；转完自动把 stateAfter 画出来。
+   * 返回 true = 正常转完；返回 false = 中途被 cancelMove 打断了，这次转动不算数。
+   */
+  animateMove(move: Move, stateAfter: CubeState): Promise<boolean>
+  /** 立刻停下正在播的转动，画面回到"转动之前"的样子（这次转动不算数） */
+  cancelMove(): void
   /** 收摊：停掉动画、摘掉画布、释放显存 */
   dispose(): void
 }
@@ -139,9 +145,10 @@ export function createCubeRenderer(container: HTMLElement): CubeRenderer {
     }
   }
 
-  function animateMove(move: Move, stateAfter: CubeState): Promise<void> {
-    // 正常情况下调用方会用"忙"标志挡住并发；万一没有，先把上一次立刻收尾，避免状态错乱
-    finishTurn()
+  function animateMove(move: Move, stateAfter: CubeState): Promise<boolean> {
+    // 如果上一次转动还在播（比如用户绕过了界面强行转动），先立刻把它停掉：
+    // 画面回到转动之前，那一次转动不算数，交给这一次重新来
+    cancelMove()
 
     const { face, direction } = parseMove(move)
     const group = new THREE.Group()
@@ -158,7 +165,7 @@ export function createCubeRenderer(container: HTMLElement): CubeRenderer {
     // 从面外侧看是顺时针 = 绕外法线转 -90°（右手定则）
     const toAngle = direction === 1 ? -Math.PI / 2 : Math.PI / 2
 
-    return new Promise<void>((resolve) => {
+    return new Promise<boolean>((resolve) => {
       running = {
         group,
         axis,
@@ -178,12 +185,26 @@ export function createCubeRenderer(container: HTMLElement): CubeRenderer {
 
     // 顺序很重要：先刷颜色，再把方块放回原位，画面才不会有跳跃感
     render(turn.stateAfter)
+    releaseGroup(turn)
+    turn.resolve(true)
+  }
+
+  /** 立刻取消：方块放回原位、转盘归零，但颜色保持不变（因为这次转动没有提交到状态里） */
+  function cancelMove(): void {
+    if (running === null) return
+    const turn = running
+    running = null
+    releaseGroup(turn)
+    turn.resolve(false)
+  }
+
+  /** 把转盘里的方块放回场景，并让转盘归零 */
+  function releaseGroup(turn: RunningTurn): void {
     for (const mesh of turn.meshes) {
       scene.add(mesh)
     }
     turn.group.rotation.set(0, 0, 0)
     scene.remove(turn.group)
-    turn.resolve()
   }
 
   function advanceTurn(now: number): void {
@@ -225,7 +246,7 @@ export function createCubeRenderer(container: HTMLElement): CubeRenderer {
     container.removeChild(renderer.domElement)
   }
 
-  return { render, animateMove, dispose }
+  return { render, animateMove, cancelMove, dispose }
 }
 
 /** 小方块位置的查找键 */

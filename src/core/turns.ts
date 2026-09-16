@@ -33,6 +33,15 @@ export function applyMove(state: CubeState, move: Move): CubeState {
   return result
 }
 
+/** 连着走好几步（测试和"检查复原计划还有效吗"都用得上） */
+export function applyMoves(state: CubeState, moves: readonly Move[]): CubeState {
+  let result = state
+  for (const move of moves) {
+    result = applyMove(result, move)
+  }
+  return result
+}
+
 /** 把某一面顺时针拧 90° */
 function turnClockwise(state: CubeState, axis: Face): CubeState {
   const faces = {} as Record<Face, Color[]>
